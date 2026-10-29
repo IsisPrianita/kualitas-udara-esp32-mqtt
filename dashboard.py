@@ -1,16 +1,7 @@
 """
 Dashboard Pemantau Kualitas Udara - SIC 8 (Kivvi)
-paho-mqtt  : subscribe data dari broker publik HiveMQ (broker.hivemq.com)
-Plotly/Dash: grafik tren + status real-time
-
-Jalankan:
-    pip install -r requirements.txt
-    python dashboard.py
-Lalu buka http://127.0.0.1:8050
-
-Broker publik: port 1883, tanpa TLS, tanpa username/password.
-Host dapat diganti lewat environment variable MQTT_HOST (opsional).
-Topic harus sama dengan yang ada di sketch.ino.
+Jalankan: pip install -r requirements.txt && python dashboard.py
+Buka: http://127.0.0.1:8050
 """
 import json
 import os
@@ -25,18 +16,19 @@ from dash import Dash, Input, Output, dcc, html
 # ====== Konfigurasi ======
 MQTT_HOST = os.getenv("MQTT_HOST", "broker.hivemq.com")
 MQTT_PORT = 1883
-TOPIC_DATA = "kivvi-sic8-isis/airquality/data"      # harus sama dengan sketch.ino
-TOPIC_STATUS = "kivvi-sic8-isis/airquality/status"  # harus sama dengan sketch.ino
+TOPIC_DATA = "kivvi-sic8-isis/airquality/data"      # sama dengan sketch.ino
+TOPIC_STATUS = "kivvi-sic8-isis/airquality/status"  # sama dengan sketch.ino
 
-THRESH_WASPADA = 1500   # harus sama dengan sketch.ino
+THRESH_WASPADA = 1500
 THRESH_BAHAYA = 2500
-MAX_POINTS = 300        # jumlah titik yang disimpan di grafik
-TRAFFIC_WINDOW = 30     # ~30 detik data terakhir
-TRAFFIC_SHARE = 0.8     # >= 80% titik berada di level Waspada ke atas
+MAX_POINTS = 300
+TRAFFIC_WINDOW = int(os.getenv("TRAFFIC_WINDOW", "30"))  # default 30, bisa dipercepat saat demo
+TRAFFIC_SHARE = 0.8
 
 COLORS = {"NORMAL": "#2e7d32", "WASPADA": "#f9a825", "BAHAYA": "#c62828"}
+GREY = "#757575"
 
-# ====== Penyimpanan data (dibagi antara thread MQTT dan Dash) ======
+# ====== Data bersama (thread MQTT dan Dash) ======
 lock = threading.Lock()
 times = deque(maxlen=MAX_POINTS)
 gas_vals = deque(maxlen=MAX_POINTS)
@@ -49,8 +41,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
         print("MQTT gagal terhubung:", reason_code)
         return
     print("MQTT terhubung ke", MQTT_HOST)
-    # Dipanggil lagi setiap reconnect, jadi subscribe otomatis diulang
-    client.subscribe([(TOPIC_DATA, 0), (TOPIC_STATUS, 0)])
+    client.subscribe([(TOPIC_DATA, 0), (TOPIC_STATUS, 0)])  # diulang tiap reconnect
 
 
 def on_disconnect(client, userdata, flags, reason_code, properties):
@@ -62,7 +53,7 @@ def on_message(client, userdata, msg):
 
     if msg.topic == TOPIC_STATUS:
         with lock:
-            state["device"] = payload  # "online" / "offline" (Last Will)
+            state["device"] = payload  # "online" / "offline"
         return
 
     try:
@@ -84,16 +75,13 @@ def on_message(client, userdata, msg):
 
 
 def start_mqtt():
-    # client_id unik supaya tidak bentrok dengan pengguna lain di broker publik
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="kivvi-dashboard-isis")
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
-    # connect_async: dashboard tetap jalan walaupun internet belum tersedia,
-    # koneksi dicoba terus oleh thread MQTT
     client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=30)
-    client.loop_start()  # jalan di thread terpisah, reconnect otomatis
+    client.loop_start()
     return client
 
 
@@ -108,7 +96,7 @@ def traffic_hint():
     return "Pola polusi tidak menunjukkan indikasi kepadatan."
 
 
-# ====== Dashboard ======
+# ====== Layout ======
 app = Dash(__name__)
 app.title = "Pemantau Kualitas Udara - Kivvi"
 
@@ -116,8 +104,7 @@ app.layout = html.Div(
     style={"fontFamily": "Arial, sans-serif", "maxWidth": "960px", "margin": "0 auto", "padding": "16px"},
     children=[
         html.H2("Pemantau Kualitas Udara Real-Time"),
-        html.Div(id="status-box", style={"padding": "16px", "borderRadius": "8px", "color": "white",
-                                         "fontSize": "28px", "fontWeight": "bold", "textAlign": "center"}),
+        html.Div(id="status-box"),
         html.P(id="meta", style={"marginTop": "8px", "color": "#444"}),
         dcc.Graph(id="gas-graph"),
         html.P(id="traffic", style={"fontStyle": "italic"}),
@@ -154,10 +141,18 @@ def refresh(_):
     )
 
     status = st["status"]
+    offline = st["device"] == "offline"
+
     label = f"STATUS: {status}" + ("  (ALARM TERKUNCI)" if st["latch"] else "")
-    box_style = {"padding": "16px", "borderRadius": "8px", "color": "white", "fontSize": "28px",
-                 "fontWeight": "bold", "textAlign": "center",
-                 "backgroundColor": COLORS.get(status, "#757575")}
+    if offline:  # perangkat mati
+        label += "  [PERANGKAT OFFLINE]"
+        hint = "Perangkat offline: indikasi lalu lintas tidak aktif."
+
+    box_style = {
+        "padding": "16px", "borderRadius": "8px", "color": "white", "fontSize": "28px",
+        "fontWeight": "bold", "textAlign": "center",
+        "backgroundColor": GREY if offline else COLORS.get(status, GREY),
+    }
     meta = f"Gas: {st['gas']}  |  Level sensor: {st['level']}  |  Perangkat: {st['device']}"
     return fig, label, box_style, meta, hint
 
